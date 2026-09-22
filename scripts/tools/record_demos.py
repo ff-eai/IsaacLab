@@ -63,6 +63,16 @@ parser.add_argument(
     default=False,
     help="Enable Pinocchio.",
 )
+parser.add_argument(
+    "--xr_autostart",
+    action="store_true",
+    default=False,
+    help=(
+        "Begin stepping the environment immediately in XR mode instead of waiting for a START"
+        " teleop command. Needed with clients that cannot send one (the CloudXR.js sample client"
+        " has no teleop UI), where the hands otherwise track visibly while the robot never moves."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -417,7 +427,13 @@ def run_simulation_loop(
     current_recorded_demo_count = 0
     success_step_count = 0
     should_reset_recording_instance = False
-    running_recording_instance = not args_cli.xr
+    # In XR the loop idles until the client sends a START teleop command. Clients
+    # without a teleop UI never send one, so the retargeter keeps running (hands
+    # track in the viewport) while env.step() is never called and the robot holds
+    # its reset pose. --xr_autostart skips that wait.
+    running_recording_instance = (not args_cli.xr) or args_cli.xr_autostart
+    if args_cli.xr and args_cli.xr_autostart:
+        print("[record_demos] --xr_autostart: stepping immediately, not waiting for a START command.")
 
     # Callback closures for the teleop device
     def reset_recording_instance():

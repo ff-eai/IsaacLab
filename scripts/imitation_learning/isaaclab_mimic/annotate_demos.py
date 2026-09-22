@@ -371,6 +371,15 @@ def replay_episode(
                 continue
         action_tensor = torch.Tensor(action).reshape([1, action.shape[0]])
         env.step(torch.Tensor(action_tensor))
+        # Tick the success term per step so any env-local latches (e.g. the
+        # `_a2_was_lifted` latch in place_on_tray_with_lift) accumulate
+        # correctly during replay. We discard the return value here — the
+        # final success check below is what gates export.
+        if success_term is not None:
+            try:
+                success_term.func(env, **success_term.params)
+            except Exception:
+                pass
     if success_term is not None:
         if not bool(success_term.func(env, **success_term.params)[0]):
             return False

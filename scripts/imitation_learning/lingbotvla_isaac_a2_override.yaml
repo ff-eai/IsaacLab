@@ -1,0 +1,6 @@
+# LINGBOTVLA_CLI override for evaluating the a2_pickplace_isaac_57-trained
+# checkpoint (action_dim=41) on Isaac Lab. Deep-merged onto the checkpoint's
+# own lingbotvla_cli.yaml; only fields that need to differ from training go here.
+data:
+  norm_stats_file: assets/norm_stats/a2_pickplace_isaac_57_41d.json
+  norm_type: bounds_99_woclip

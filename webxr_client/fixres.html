@@ -1,0 +1,126 @@
+<!doctype html>
+<!--
+  Stream geometry repair for the CloudXR.js client.
+
+  The client restores saved values from localStorage into its settings inputs on
+  load, so stale numbers cached in the headset browser override whatever device
+  preset is selected. That is what produces:
+
+      ERROR [processSystemInfo] Ignoring streaming dimensions 4096x4032, expected 2048x1792
+
+  The runtime encodes 2048x1792 per eye (its log: "render_dimensions: 2048 x 1792",
+  "View 0 warped:2048x1792"). This page writes matching values into localStorage for
+  this origin, then sends you to the client.
+
+  Open on the headset:  https://<host-ip>:8443/fixres.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Fix CloudXR stream geometry</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; padding:24px 16px; background:#12141a; color:#e6e8ee;
+         font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:760px; margin:0 auto; }
+  h1 { font-size:1.3rem; margin:0 0 4px; }
+  p.sub { color:#9aa3b5; margin:0 0 20px; }
+  button { font:inherit; font-weight:600; padding:14px 22px; min-height:48px;
+           border:0; border-radius:10px; background:#4f7cff; color:#fff; cursor:pointer; margin-right:8px; }
+  button.secondary { background:#3a4152; }
+  table { border-collapse:collapse; width:100%; margin:16px 0; font-size:14px; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid #262b36; }
+  th { color:#9aa3b5; font-weight:600; }
+  td.new { color:#35c07f; font-weight:600; }
+  td.old { color:#e0a93b; }
+  #done { margin:16px 0; padding:14px; border-radius:10px; background:#1a1d26;
+          border-left:4px solid #35c07f; font-weight:600; }
+  code { background:#232735; padding:1px 5px; border-radius:4px; font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Fix CloudXR stream geometry</h1>
+  <p class="sub">Aligns this browser's saved client settings with what the runtime encodes: 2048&times;1792 per eye, no extra foveation.</p>
+
+  <div id="done" hidden></div>
+
+  <table id="tbl">
+    <thead><tr><th>Setting</th><th>Saved now</th><th>Will be set to</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <button id="apply">Apply and open the client</button>
+  <button id="clear" class="secondary">Clear all saved settings</button>
+
+  <p class="sub" style="margin-top:22px;">
+    After connecting, the runtime log should no longer say
+    <code>Ignoring streaming dimensions</code>. If it still does, the headset is
+    reporting a framebuffer this client scales differently &mdash; tell Claude the new
+    numbers from that log line.
+  </p>
+</main>
+
+<script>
+// Matches the client's own pico4ultra preset, and the runtime's render_dimensions.
+const WANTED = {
+  deviceProfile: 'pico4ultra',
+  perEyeWidth: '2048',
+  perEyeHeight: '1792',
+  reprojectionGridCols: '64',
+  reprojectionGridRows: '64',
+  deviceFrameRate: '90',
+  codec: 'av1',
+  maxStreamingBitrateMbps: '100',
+  enableTexSubImage2D: 'false',
+  useQuestColorWorkaround: 'false',
+  enablePoseSmoothing: 'true',
+  posePredictionFactor: '1',
+};
+
+const tbody = document.querySelector('#tbl tbody');
+function render() {
+  tbody.innerHTML = '';
+  for (const [k, v] of Object.entries(WANTED)) {
+    let cur = null;
+    try { cur = localStorage.getItem(k); } catch (e) { cur = '(localStorage blocked)'; }
+    const tr = document.createElement('tr');
+    const same = cur === v;
+    tr.innerHTML = `<td>${k}</td>`
+      + `<td class="${same ? '' : 'old'}">${cur === null ? '(unset)' : cur}</td>`
+      + `<td class="new">${v}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+render();
+
+document.getElementById('apply').addEventListener('click', () => {
+  let failed = null;
+  try {
+    for (const [k, v] of Object.entries(WANTED)) localStorage.setItem(k, v);
+  } catch (e) {
+    failed = e.message;
+  }
+  const done = document.getElementById('done');
+  done.hidden = false;
+  if (failed) {
+    done.textContent = 'Could not write localStorage: ' + failed;
+    done.style.borderLeftColor = '#ff6b6b';
+    return;
+  }
+  done.textContent = 'Saved. Opening the client — select Pico 4 Ultra if the dropdown is not already on it, then CONNECT.';
+  render();
+  setTimeout(() => { window.location.href = '/'; }, 1200);
+});
+
+document.getElementById('clear').addEventListener('click', () => {
+  try { localStorage.clear(); } catch (e) {}
+  const done = document.getElementById('done');
+  done.hidden = false;
+  done.textContent = 'All saved settings cleared. The client will fall back to its built-in preset defaults.';
+  render();
+});
+</script>
+</body>
+</html>

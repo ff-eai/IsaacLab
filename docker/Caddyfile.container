@@ -1,0 +1,62 @@
+# Containerised version of the repo-root Caddyfile, with the host-specific bits
+# lifted into environment variables (see docker/.env.x2mimic).
+#
+# Serves the WebXR client and the CloudXR signaling endpoints from one HTTPS
+# origin, so the headset's browser treats them as same-origin.
+
+{
+	# No auto-provisioning: the cert is an mkcert leaf for a private address.
+	auto_https off
+	admin off
+}
+
+https://:{$WEBXR_PORT:8443} {
+	# ALPN http/1.1 only: CloudXR's /sign_in is a plain WS Upgrade, which Caddy
+	# relays correctly only over HTTP/1.1. Over HTTP/2 the Upgrade header is
+	# dropped and the endpoint answers 501.
+	tls /certs/{$TLS_CERT} /certs/{$TLS_KEY} {
+		alpn http/1.1
+	}
+
+	# To stdout, so it lands in `docker compose logs webxr` rather than a file
+	# inside a container with no log directory.
+	log {
+		output stdout
+		format json
+	}
+
+	# WebXR needs a cross-origin-isolated context (SharedArrayBuffer et al).
+	header {
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
+	}
+
+	@cloudxr path /attachment* /head* /pose* /sign_in* /sign_out* /message* /wait* /leave* /heartbeat*
+
+	# CORS for the NVIDIA-hosted client, which reaches these endpoints from its own
+	# origin. The locally served client is same-origin and ignores all of this.
+	header @cloudxr {
+		Access-Control-Allow-Origin "{$HOSTED_CLIENT_ORIGIN:https://nvidia.github.io}"
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type"
+		Access-Control-Max-Age "86400"
+		Vary "Origin"
+		# The client page runs under COEP: require-corp, so cross-origin
+		# subresources must opt in explicitly or the browser drops them.
+		Cross-Origin-Resource-Policy "cross-origin"
+	}
+
+	# Answer preflight here -- the CloudXR service returns 501 for OPTIONS, which a
+	# browser reads as a failed preflight and then blocks the real request.
+	@cloudxr_preflight {
+		method OPTIONS
+		path /attachment* /head* /pose* /sign_in* /sign_out* /message* /wait* /leave* /heartbeat*
+	}
+	respond @cloudxr_preflight 204
+
+	reverse_proxy @cloudxr {$CLOUDXR_SIGNALING:127.0.0.1:49100}
+
+	# Everything else: the static WebXR client.
+	root * /srv
+	file_server
+}

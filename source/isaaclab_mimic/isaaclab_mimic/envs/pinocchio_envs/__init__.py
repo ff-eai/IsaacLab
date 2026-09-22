@@ -47,3 +47,17 @@ gym.register(
     kwargs={"env_cfg_entry_point": f"{__name__}.locomanipulation_g1_mimic_env_cfg:LocomanipulationG1MimicEnvCfg"},
     disable_env_checker=True,
 )
+
+gym.register(
+    id="Isaac-PickPlace-A2-Mimic-v0",
+    entry_point=f"{__name__}.pickplace_a2_mimic_env:PickPlaceA2MimicEnv",
+    kwargs={"env_cfg_entry_point": f"{__name__}.pickplace_a2_mimic_env_cfg:PickPlaceA2MimicEnvCfg"},
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-PickPlace-X2-Mimic-v0",
+    entry_point=f"{__name__}.pickplace_x2_mimic_env:PickPlaceX2MimicEnv",
+    kwargs={"env_cfg_entry_point": f"{__name__}.pickplace_x2_mimic_env_cfg:PickPlaceX2MimicEnvCfg"},
+    disable_env_checker=True,
+)

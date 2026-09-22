@@ -7,6 +7,7 @@
 # Configuration for different assets.
 ##
 
+from .a2 import *
 from .agibot import *
 from .agility import *
 from .allegro import *
@@ -30,3 +31,4 @@ from .shadow_hand import *
 from .spot import *
 from .unitree import *
 from .universal_robots import *
+from .x2 import *

@@ -18,6 +18,12 @@ parser = argparse.ArgumentParser(description="Generate demonstrations for Isaac 
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--generation_num_trials", type=int, help="Number of demos to be generated.", default=None)
 parser.add_argument(
+    "--generation_guarantee",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Stop after N successes (default env cfg) or N total attempts (--no-generation-guarantee).",
+)
+parser.add_argument(
     "--num_envs", type=int, default=1, help="Number of environments to instantiate for generating datasets."
 )
 parser.add_argument("--input_file", type=str, default=None, required=True, help="File path to the source dataset file.")
@@ -54,6 +60,8 @@ if args_cli.enable_pinocchio:
     # installed by IsaacLab and not the one installed by Isaac Sim.
     # pinocchio is required by the Pink IK controllers and the GR1T2 retargeter
     import pinocchio  # noqa: F401
+    # Also import pinocchio_envs to register GR1T2 tasks
+    import isaaclab_mimic.envs.pinocchio_envs  # noqa: F401
 
 # launch the simulator
 app_launcher = AppLauncher(args_cli)
@@ -73,9 +81,10 @@ import torch
 from isaaclab.envs import ManagerBasedRLMimicEnv
 
 import isaaclab_mimic.envs  # noqa: F401
+import isaaclab_mimic.envs.pinocchio_envs  # noqa: F401
 
 if args_cli.enable_pinocchio:
-    import isaaclab_mimic.envs.pinocchio_envs  # noqa: F401
+    import pinocchio  # noqa: F401
 
 from isaaclab_mimic.datagen.generation import env_loop, setup_async_generation, setup_env_config
 from isaaclab_mimic.datagen.utils import get_env_name_from_dataset, setup_output_paths
@@ -104,6 +113,7 @@ def main():
         num_envs=num_envs,
         device=args_cli.device,
         generation_num_trials=args_cli.generation_num_trials,
+        generation_guarantee=args_cli.generation_guarantee,
     )
 
     # Create environment

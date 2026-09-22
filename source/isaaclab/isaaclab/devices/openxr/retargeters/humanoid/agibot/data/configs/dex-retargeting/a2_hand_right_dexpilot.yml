@@ -1,0 +1,25 @@
+retargeting:
+  type: DexPilot
+  urdf_path: /home/wagner/code/IsaacLab/assets/A2/R_hand_nomimic.urdf
+  wrist_link_name: right_hand_base
+  finger_tip_link_names:
+  - R_thumb_3
+  - R_index_2
+  - R_middle_2
+  - R_ring_2
+  - R_pinky_2
+  target_joint_names:
+  - R_thumb_swing_joint
+  - R_thumb_1_joint
+  - R_thumb_2_joint
+  - R_thumb_3_joint
+  - R_index_1_joint
+  - R_index_2_joint
+  - R_middle_1_joint
+  - R_middle_2_joint
+  - R_ring_1_joint
+  - R_ring_2_joint
+  - R_pinky_1_joint
+  - R_pinky_2_joint
+  low_pass_alpha: 0.5
+  scaling_factor: 1.2

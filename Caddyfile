@@ -1,0 +1,61 @@
+{
+	# Don't try to auto-provision certs for a private IP; we provide our own.
+	auto_https off
+	# No admin endpoint needed for a single-site config.
+	admin off
+}
+
+# WebXR client + CloudXR signaling reverse proxy, served from the same HTTPS
+# origin so the browser treats /attachment|/head|/pose as same-origin (no CORS).
+https://:8443 {
+	# ALPN http/1.1 only: the CloudXR signaling /sign_in endpoint uses a
+	# standard WS Upgrade that Caddy only forwards correctly over HTTP/1.1.
+	# Over HTTP/2 the Upgrade header is not relayed and the proxy returns 501.
+	tls /home/wagner/code/IsaacLab/webxr_certs/172.18.33.98+2.pem /home/wagner/code/IsaacLab/webxr_certs/172.18.33.98+2-key.pem {
+		alpn http/1.1
+	}
+
+	log {
+		output file /tmp/caddy-access.log
+		format json
+	}
+
+	# WebXR requires a cross-origin-isolated context (SharedArrayBuffer etc).
+	header {
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
+	}
+
+	# CloudXR Runtime signaling endpoints (plain HTTP upstream on :49100).
+	@cloudxr path /attachment* /head* /pose* /sign_in* /sign_out* /message* /wait* /leave* /heartbeat*
+
+	# CORS, so the NVIDIA-hosted client at https://nvidia.github.io/IsaacTeleop/client
+	# can drive these endpoints cross-origin. The locally served client is
+	# same-origin and ignores all of this. Only the signaling paths get these
+	# headers; the static client files below stay untouched.
+	header @cloudxr {
+		Access-Control-Allow-Origin "https://nvidia.github.io"
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type"
+		Access-Control-Max-Age "86400"
+		# Caches must not serve one origin's response to another.
+		Vary "Origin"
+		# The client page runs under COEP: require-corp, so every cross-origin
+		# subresource it pulls must opt in explicitly or the browser drops it.
+		Cross-Origin-Resource-Policy "cross-origin"
+	}
+
+	# Answer preflight locally -- the CloudXR service returns 501 for OPTIONS,
+	# which the browser reads as a failed preflight and blocks the real request.
+	@cloudxr_preflight {
+		method OPTIONS
+		path /attachment* /head* /pose* /sign_in* /sign_out* /message* /wait* /leave* /heartbeat*
+	}
+	respond @cloudxr_preflight 204
+
+	reverse_proxy @cloudxr 127.0.0.1:49100
+
+	# Everything else: static WebXR client files.
+	root * /home/wagner/code/IsaacLab/webxr_client
+	file_server
+}

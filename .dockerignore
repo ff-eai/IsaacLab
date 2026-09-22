@@ -28,3 +28,11 @@ _isaac_sim?
 docker/.isaac-lab-docker-history
 # ignore uv environment
 env_isaaclab
+# ignore recorded/generated datasets (20+ GB); bind-mount them at runtime instead
+datasets/
+# never bake TLS private keys into an image; the webxr service mounts these
+webxr_certs/
+# ignore the vendored CloudXR SDK tarball (built into cloudxr-hybrid separately)
+cloudxr-hybrid/sdk.tar.gz
+# ignore local caddy binary (the webxr service uses the official caddy image)
+bin/caddy

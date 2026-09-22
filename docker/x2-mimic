@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# X2 pick-place pipeline: teleop recording -> subtask annotation -> Isaac Mimic generation.
+#
+# Every stage runs through isaaclab.sh so it picks up the Isaac Sim python.
+# Paths and task ids are overridable by environment variable; see `x2-mimic help`.
+
+set -euo pipefail
+
+ISAACLAB_PATH="${ISAACLAB_PATH:-/workspace/isaaclab}"
+DATASET_DIR="${DATASET_DIR:-/workspace/datasets}"
+
+RECORD_TASK="${RECORD_TASK:-Isaac-PickPlace-X2-Abs-v0}"
+MIMIC_TASK="${MIMIC_TASK:-Isaac-PickPlace-X2-Mimic-v0}"
+TELEOP_DEVICE="${TELEOP_DEVICE:-handtracking}"
+NUM_ENVS="${NUM_ENVS:-4}"
+NUM_TRIALS="${NUM_TRIALS:-500}"
+
+lab() { "${ISAACLAB_PATH}/isaaclab.sh" -p "$@"; }
+
+stamp() { date +%Y%m%d_%H%M; }
+
+cmd_help() {
+    cat <<'EOF'
+x2-mimic -- X2 OmniHand pick-place demo collection and Isaac Mimic generation
+
+  record [OUT.hdf5] [extra args...]
+      Teleop recording on the plain env. With TELEOP_DEVICE=handtracking (default)
+      this runs in XR against the CloudXR runtime: start AR in the Isaac Sim window,
+      then connect the headset. Set TELEOP_DEVICE=keyboard for a no-headset session.
+      Default OUT: $DATASET_DIR/x2_place_can_<timestamp>.hdf5
+
+  annotate IN.hdf5 [OUT.hdf5] [extra args...]
+      Replay demos through the mimic env and mark subtask boundaries (--auto).
+      Default OUT: <IN basename>_annotated.hdf5
+
+  generate IN.hdf5 [OUT.hdf5] [extra args...]
+      Isaac Mimic data generation from annotated demos.
+      Honors NUM_ENVS (default 4) and NUM_TRIALS (default 500).
+      Default OUT: <IN basename>_generated.hdf5
+
+  all [SOURCE.hdf5]
+      annotate + generate over an existing recording.
+
+  verify
+      Headless check: env builds, action layout is 46-dim, subtask signals work.
+      Run this first -- it needs a GPU but no headset.
+
+  inspect FILE.hdf5
+      Episode count and recorded task for a dataset.
+
+  shell
+      Interactive bash inside the container.
+
+Environment overrides:
+  RECORD_TASK=$RECORD_TASK
+  MIMIC_TASK=$MIMIC_TASK
+  TELEOP_DEVICE=handtracking|keyboard
+  DATASET_DIR=$DATASET_DIR
+  NUM_ENVS, NUM_TRIALS
+EOF
+}
+
+cmd_record() {
+    local out="${1:-${DATASET_DIR}/x2_place_can_$(stamp).hdf5}"
+    [ $# -gt 0 ] && shift || true
+    mkdir -p "$(dirname "${out}")"
+
+    # XR only makes sense for the hand-tracking path; the keyboard device drives the
+    # Isaac Sim window directly and must not pull in the OpenXR runtime.
+    local xr_args=()
+    if [[ "${TELEOP_DEVICE}" == *handtracking* ]]; then
+        # --xr_autostart because the bundled CloudXR.js client has no teleop UI and
+        # cannot send the START command record_demos.py otherwise waits for. Set
+        # XR_AUTOSTART=0 if you switch to a client that can (the NVIDIA-hosted one).
+        xr_args=(--xr)
+        [ "${XR_AUTOSTART:-1}" = "1" ] && xr_args+=(--xr_autostart)
+        if [ ! -S "${XDG_RUNTIME_DIR:-/openxr/run}/ipc_cloudxr" ]; then
+            echo "x2-mimic: CloudXR runtime socket not found at ${XDG_RUNTIME_DIR:-/openxr/run}/ipc_cloudxr" >&2
+            echo "          Start the cloudxr-runtime service before recording." >&2
+            exit 1
+        fi
+    fi
+
+    echo "x2-mimic: recording ${RECORD_TASK} (${TELEOP_DEVICE}) -> ${out}"
+    lab scripts/tools/record_demos.py \
+        --task "${RECORD_TASK}" \
+        --teleop_device "${TELEOP_DEVICE}" \
+        --dataset_file "${out}" \
+        --enable_pinocchio --enable_cameras \
+        "${xr_args[@]}" "$@"
+}
+
+cmd_annotate() {
+    local in="${1:?usage: x2-mimic annotate IN.hdf5 [OUT.hdf5]}"; shift
+    local out="${1:-${in%.hdf5}_annotated.hdf5}"
+    [ $# -gt 0 ] && shift || true
+
+    echo "x2-mimic: annotating ${in} -> ${out}"
+    lab scripts/imitation_learning/isaaclab_mimic/annotate_demos.py \
+        --task "${MIMIC_TASK}" \
+        --input_file "${in}" \
+        --output_file "${out}" \
+        --auto --enable_pinocchio "$@"
+}
+
+cmd_generate() {
+    local in="${1:?usage: x2-mimic generate IN.hdf5 [OUT.hdf5]}"; shift
+    local out="${1:-${in%.hdf5}_generated.hdf5}"
+    [ $# -gt 0 ] && shift || true
+
+    echo "x2-mimic: generating from ${in} -> ${out} (envs=${NUM_ENVS} trials=${NUM_TRIALS})"
+    lab scripts/imitation_learning/isaaclab_mimic/generate_dataset.py \
+        --task "${MIMIC_TASK}" \
+        --input_file "${in}" \
+        --output_file "${out}" \
+        --num_envs "${NUM_ENVS}" \
+        --generation_num_trials "${NUM_TRIALS}" \
+        --enable_pinocchio --headless "$@"
+}
+
+cmd_all() {
+    local src="${1:?usage: x2-mimic all SOURCE.hdf5}"
+    local annotated="${src%.hdf5}_annotated.hdf5"
+    cmd_annotate "${src}" "${annotated}"
+    cmd_generate "${annotated}" "${annotated%.hdf5}_generated.hdf5"
+}
+
+cmd_verify() {
+    echo "x2-mimic: verifying ${MIMIC_TASK} (headless, GPU required)"
+    lab scripts/demos/x2_mimic_smoke_test.py --headless
+}
+
+cmd_inspect() {
+    local f="${1:?usage: x2-mimic inspect FILE.hdf5}"
+    lab -c "
+import h5py, json, sys
+with h5py.File('${f}', 'r') as fh:
+    data = fh.get('data')
+    n = len(data) if data is not None else 0
+    args = data.attrs.get('env_args') if data is not None else None
+    task = json.loads(args)['env_name'] if args else 'unknown'
+    print(f'episodes: {n}')
+    print(f'task:     {task}')
+"
+}
+
+case "${1:-help}" in
+    record)   shift; cmd_record "$@" ;;
+    annotate) shift; cmd_annotate "$@" ;;
+    generate) shift; cmd_generate "$@" ;;
+    all)      shift; cmd_all "$@" ;;
+    verify)   shift; cmd_verify "$@" ;;
+    inspect)  shift; cmd_inspect "$@" ;;
+    shell)    shift; exec bash "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) echo "x2-mimic: unknown command '$1'" >&2; echo >&2; cmd_help >&2; exit 2 ;;
+esac

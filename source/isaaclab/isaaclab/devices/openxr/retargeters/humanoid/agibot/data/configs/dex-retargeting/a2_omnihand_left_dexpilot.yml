@@ -1,0 +1,23 @@
+retargeting:
+  type: DexPilot
+  urdf_path: /home/wagner/code/IsaacLab/assets/A2_omnihand/L_omnihand.urdf
+  wrist_link_name: L_hand_base
+  finger_tip_link_names:
+  - L_thumb_dip_link
+  - L_index_dip_link
+  - L_middle_dip_link
+  - L_ring_dip_link
+  - L_pinky_dip_link
+  target_joint_names:
+  - L_thumb_roll_joint
+  - L_thumb_abad_joint
+  - L_thumb_mcp_joint
+  - L_index_abad_joint
+  - L_index_pip_joint
+  - L_middle_pip_joint
+  - L_ring_abad_joint
+  - L_ring_pip_joint
+  - L_pinky_abad_joint
+  - L_pinky_pip_joint
+  low_pass_alpha: 0.5
+  scaling_factor: 1.2

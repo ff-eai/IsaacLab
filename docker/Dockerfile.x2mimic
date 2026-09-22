@@ -1,0 +1,211 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Isaac Lab image for X2 (OmniHand T2) pick-place demo collection and Isaac Mimic
+# data generation.
+#
+# Follows docker/Dockerfile.base and adds what the X2 pipeline needs:
+#   * X2_omnihand + RoboTwin assets baked in (the env configs load them at runtime)
+#   * a /home/wagner/code/IsaacLab symlink, because pickplace_x2_env_cfg.py resolves
+#     its URDF and mesh root by absolute path
+#   * the `x2-mimic` helper wrapping record -> annotate -> generate
+#
+# Build:
+#   docker compose -f docker/docker-compose.x2mimic.yaml --env-file docker/.env.x2mimic build
+#
+# The CloudXR runtime and the WebXR/Caddy front end are separate services in that
+# compose file -- the runtime is its own daemon on its own base image and cannot be
+# folded into this one.
+
+ARG ISAACSIM_BASE_IMAGE_ARG=nvcr.io/nvidia/isaac-sim
+ARG ISAACSIM_VERSION_ARG=5.1.0
+FROM ${ISAACSIM_BASE_IMAGE_ARG}:${ISAACSIM_VERSION_ARG} AS base
+
+SHELL ["/bin/bash", "-c"]
+
+LABEL description="Isaac Lab + X2 OmniHand pick-place teleop recording and Isaac Mimic generation"
+
+ARG ISAACSIM_ROOT_PATH_ARG=/isaac-sim
+ENV ISAACSIM_ROOT_PATH=${ISAACSIM_ROOT_PATH_ARG}
+ARG ISAACLAB_PATH_ARG=/workspace/isaaclab
+ENV ISAACLAB_PATH=${ISAACLAB_PATH_ARG}
+ARG DOCKER_USER_HOME_ARG=/root
+ENV DOCKER_USER_HOME=${DOCKER_USER_HOME_ARG}
+
+# pickplace_x2_env_cfg.py hardcodes this prefix for the merged URDF, the mesh root
+# and the RoboTwin can/tray USDs. Rather than patch the configs (and drift from the
+# host checkout), the repo is reachable under the same absolute path in here.
+ARG HOST_REPO_PATH_ARG=/home/wagner/code/IsaacLab
+ENV HOST_REPO_PATH=${HOST_REPO_PATH_ARG}
+
+# Where recorded and generated datasets land. Bind-mount this to keep them.
+ENV DATASET_DIR=/workspace/datasets
+
+ENV LANG=C.UTF-8
+ENV DEBIAN_FRONTEND=noninteractive
+# Kit refuses to start as root without this.
+ENV OMNI_KIT_ALLOW_ROOT=1
+
+USER root
+
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    libglib2.0-0 \
+    ncurses-term \
+    wget && \
+    apt -y autoremove && apt clean autoclean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Files excluded from the build context are listed in .dockerignore -- notably
+# datasets/ (20+ GB of recordings) and webxr_certs/ (private keys).
+COPY ../ ${ISAACLAB_PATH}
+
+RUN chmod +x ${ISAACLAB_PATH}/isaaclab.sh
+RUN ln -sf ${ISAACSIM_ROOT_PATH} ${ISAACLAB_PATH}/_isaac_sim
+
+# Absolute-path escape hatch for the X2 asset references described above.
+RUN mkdir -p "$(dirname ${HOST_REPO_PATH})" && \
+    ln -sfn ${ISAACLAB_PATH} ${HOST_REPO_PATH}
+
+RUN ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install toml
+
+RUN --mount=type=cache,target=/var/cache/apt \
+    ${ISAACLAB_PATH}/isaaclab.sh -p ${ISAACLAB_PATH}/tools/install_deps.py apt ${ISAACLAB_PATH}/source && \
+    apt -y autoremove && apt clean autoclean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p ${ISAACSIM_ROOT_PATH}/kit/cache && \
+    mkdir -p ${DOCKER_USER_HOME}/.cache/ov && \
+    mkdir -p ${DOCKER_USER_HOME}/.cache/pip && \
+    mkdir -p ${DOCKER_USER_HOME}/.cache/nvidia/GLCache && \
+    mkdir -p ${DOCKER_USER_HOME}/.nv/ComputeCache && \
+    mkdir -p ${DOCKER_USER_HOME}/.nvidia-omniverse/logs && \
+    mkdir -p ${DOCKER_USER_HOME}/.local/share/ov/data && \
+    mkdir -p ${DOCKER_USER_HOME}/Documents && \
+    mkdir -p ${DATASET_DIR}
+
+# Installs isaaclab, isaaclab_assets, isaaclab_tasks and isaaclab_mimic, and pulls
+# pin-pink + dex-retargeting (declared in source/isaaclab/setup.py) which the Pink IK
+# controller and the OmniHand retargeter need.
+RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
+    ${ISAACLAB_PATH}/isaaclab.sh --install
+
+# HACK: mirrors Dockerfile.base -- quadprog breaks the image build.
+RUN ${ISAACLAB_PATH}/isaaclab.sh -p -m pip uninstall -y quadprog
+
+# isaaclab_rl declares an unpinned `torch>=2.7`, so pip resolves the CUDA 13 wheel
+# set (nvidia-cublas 13.x, nvidia-cuda-runtime 13.x, nccl-cu13, ...) on top of the
+# CUDA 12 stack Isaac Sim ships. torch itself stays at 2.7.0+cu128, but the cu13
+# libraries shadow the bundled ones and every Isaac Sim extension then dies with:
+#   OSError: libcudart.so.12: cannot open shared object file
+#   ValueError: libcublas.so.*[0-9] not found in the system path
+# Dropping them lets the prebundled CUDA 12 libraries resolve again.
+#
+# Isaac Sim ships CUDA 12 wheels in its extension prebundle
+# (omni.isaac.ml_archive/pip_prebundle) and pip reports them as already satisfied
+# from there -- but that directory is NOT on the sys.path the Isaac Sim extensions
+# actually search, as their own error spells out:
+#   libcublas.so.*[0-9] not found in the system path ['', ... site-packages, ...]
+# So the wheels have to be materialized in site-packages, which is where a working
+# host install keeps them. --ignore-installed is what makes pip do it despite the
+# prebundle. The cu13 packages are removed first, along with the empty nvidia/
+# namespace directory pip leaves behind, which would otherwise shadow the good one.
+RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
+    set -e; \
+    site=${ISAACSIM_ROOT_PATH}/kit/python/lib/python3.11/site-packages; \
+    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip uninstall -y \
+        nvidia-cublas nvidia-cuda-cupti nvidia-cuda-nvrtc nvidia-cuda-runtime \
+        nvidia-cudnn-cu13 nvidia-cufft nvidia-cufile nvidia-curand nvidia-cusolver \
+        nvidia-cusparse nvidia-cusparselt-cu13 nvidia-nccl-cu13 nvidia-nvjitlink \
+        nvidia-nvshmem-cu13 nvidia-nvtx || true; \
+    if [ -d "${site}/nvidia" ] && [ ! -f "${site}/nvidia/cuda_runtime/lib/libcudart.so.12" ]; then \
+        echo "removing shadowing namespace package ${site}/nvidia"; \
+        rm -rf "${site}/nvidia"; \
+    fi; \
+    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --ignore-installed \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        "torch==2.7.0" "torchvision==0.22.0"
+
+# --ignore-installed above also drags in torch's unpinned numpy (2.4.6), which
+# overrides the `numpy<2` that source/isaaclab/setup.py asks for. The pinocchio
+# bundled with Isaac Sim is compiled against NumPy 1.x, so a 2.x numpy turns
+# `import pinocchio` into an ImportError and then a segfault -- which kills every
+# Pink IK task, X2 included. 1.26.0 matches a known-good host install.
+RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
+    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install "numpy==1.26.0"
+
+# Import the two libraries that have to agree, so a version skew fails the build
+# instead of the first teleop session. No GPU needed for this.
+RUN ${ISAACLAB_PATH}/isaaclab.sh -p -c \
+    "import numpy, pinocchio; \
+     assert numpy.__version__.startswith('1.'), 'numpy must be <2, got ' + numpy.__version__; \
+     print('numpy', numpy.__version__, '+ pinocchio', pinocchio.__version__, 'import cleanly')"
+
+# Pink IK defaults to the daqp QP solver (pink_ik_cfg.py). isaaclab pins
+# daqp==0.7.2, whose solve() predates the `primal_start` argument this qpsolvers
+# passes, so every IK call raises TypeError. pink_ik.py catches that broadly and
+# returns the CURRENT joint positions, and the X2 config sets show_ik_warnings=False
+# -- the arm then sits perfectly still while the fingers (which bypass IK) keep
+# moving, with nothing logged. 0.9.1 is the version this qpsolvers can drive; the
+# resulting pip warning about the stale isaaclab pin is expected.
+RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
+    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-cache-dir "daqp==0.9.1" || true
+
+# Actually solve a QP with the configured solver, so a dead IK backend fails the
+# build instead of silently freezing the arm during teleop.
+RUN ${ISAACLAB_PATH}/isaaclab.sh -p -c \
+    "import numpy as np; from qpsolvers import solve_qp; \
+     x = solve_qp(np.eye(2), np.array([1.0, 1.0]), solver='daqp'); \
+     assert x is not None, 'daqp returned no solution'; \
+     print('pink ik solver daqp works ->', x)"
+
+# Fail the build rather than ship an image whose Isaac Sim extensions cannot load.
+# These are the exact libraries whose absence broke isaacsim.core.nodes,
+# isaacsim.core.simulation_manager and isaacsim.robot.manipulators, checked on the
+# path those extensions actually search.
+RUN set -e; \
+    site=${ISAACSIM_ROOT_PATH}/kit/python/lib/python3.11/site-packages; \
+    if compgen -G "${site}/nvidia/cu13/lib/*.so.13" > /dev/null; then \
+        echo "CUDA 13 libraries are back under ${site}/nvidia/cu13/lib" >&2; \
+        exit 1; \
+    fi; \
+    test -f "${site}/nvidia/cuda_runtime/lib/libcudart.so.12"; \
+    test -f "${site}/nvidia/cublas/lib/libcublas.so.12"; \
+    test -f "${site}/nvidia/cudnn/lib/libcudnn.so.9"; \
+    echo "CUDA 12 stack reachable from site-packages"
+
+# Fail loudly at build time if any X2 piece is missing, rather than at the first
+# teleop session. Covers the mimic env, its gym registration and the three assets
+# resolved through the absolute-path symlink.
+RUN set -e; \
+    mimic_dir=${ISAACLAB_PATH}/source/isaaclab_mimic/isaaclab_mimic/envs/pinocchio_envs; \
+    test -f ${mimic_dir}/pickplace_x2_mimic_env.py; \
+    test -f ${mimic_dir}/pickplace_x2_mimic_env_cfg.py; \
+    grep -q "Isaac-PickPlace-X2-Mimic-v0" ${mimic_dir}/__init__.py; \
+    test -f ${HOST_REPO_PATH}/assets/X2_omnihand/X2_omnihand.urdf; \
+    test -f ${HOST_REPO_PATH}/assets/robotwin/071_can_base0.usd; \
+    test -f ${HOST_REPO_PATH}/assets/robotwin/008_tray_base0.usd; \
+    echo "X2 mimic assets and env files present"
+
+COPY docker/x2-mimic /usr/local/bin/x2-mimic
+RUN chmod +x /usr/local/bin/x2-mimic
+
+RUN echo "export ISAACLAB_PATH=${ISAACLAB_PATH}" >> ${HOME}/.bashrc && \
+    echo "alias isaaclab=${ISAACLAB_PATH}/isaaclab.sh" >> ${HOME}/.bashrc && \
+    echo "alias python=${ISAACLAB_PATH}/_isaac_sim/python.sh" >> ${HOME}/.bashrc && \
+    echo "alias pip='${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip'" >> ${HOME}/.bashrc && \
+    echo "shopt -s histappend" >> ${HOME}/.bashrc
+
+WORKDIR ${ISAACLAB_PATH}
+
+# The isaac-sim base sets ENTRYPOINT ["/isaac-sim/runheadless.sh"], which ignores
+# any CMD and launches the streaming app instead -- a container started as
+# `docker run <image> x2-mimic verify` would sit in that app forever and never run
+# the command. Replace it so arguments reach the helper.
+ENTRYPOINT ["/usr/local/bin/x2-mimic"]
+CMD ["help"]

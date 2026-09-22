@@ -1,0 +1,134 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Full X2 demo-collection stack: Isaac Lab + CloudXR runtime + WebXR front end.
+#
+#   docker compose -f docker/docker-compose.x2mimic.yaml --env-file docker/.env.x2mimic build
+#   docker compose -f docker/docker-compose.x2mimic.yaml --env-file docker/.env.x2mimic up -d
+#   docker compose -f docker/docker-compose.x2mimic.yaml --env-file docker/.env.x2mimic \
+#       exec x2-mimic x2-mimic verify
+#
+# All three services use host networking: CloudXR media ports are numerous and
+# dynamic, the headset connects straight to this machine, and Isaac Lab reaches
+# the runtime over the shared /openxr socket rather than TCP.
+
+x-gpu-all: &gpu-all
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [ gpu ]
+
+services:
+  # Isaac Lab with the X2 env, the X2 mimic env and the assets baked in.
+  x2-mimic:
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile.x2mimic
+      args:
+        - ISAACSIM_BASE_IMAGE_ARG=${ISAACSIM_BASE_IMAGE}
+        - ISAACSIM_VERSION_ARG=${ISAACSIM_VERSION}
+        - ISAACSIM_ROOT_PATH_ARG=${DOCKER_ISAACSIM_ROOT_PATH}
+        - ISAACLAB_PATH_ARG=${DOCKER_ISAACLAB_PATH}
+        - DOCKER_USER_HOME_ARG=${DOCKER_USER_HOME}
+        - HOST_REPO_PATH_ARG=${HOST_REPO_PATH}
+    image: isaac-lab-x2mimic${DOCKER_NAME_SUFFIX-}
+    container_name: isaac-lab-x2mimic${DOCKER_NAME_SUFFIX-}
+    environment:
+      - ACCEPT_EULA=${ACCEPT_EULA}
+      - OMNI_KIT_ALLOW_ROOT=1
+      - ISAACSIM_PATH=${DOCKER_ISAACLAB_PATH}/_isaac_sim
+      - DATASET_DIR=/workspace/datasets
+      # Point the OpenXR loader at the CloudXR runtime shared through the volume.
+      - XDG_RUNTIME_DIR=/openxr/run
+      - XR_RUNTIME_JSON=/openxr/share/openxr/1/openxr_cloudxr.json
+      # Needed for the Isaac Sim window (the AR panel lives there).
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - openxr:/openxr:rw
+      # Recordings and generated datasets live on the host, not in the image.
+      - ${DATASET_HOST_DIR}:/workspace/datasets:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - isaac-cache-kit:${DOCKER_ISAACSIM_ROOT_PATH}/kit/cache
+      - isaac-cache-ov:${DOCKER_USER_HOME}/.cache/ov
+      - isaac-cache-gl:${DOCKER_USER_HOME}/.cache/nvidia/GLCache
+      - isaac-cache-compute:${DOCKER_USER_HOME}/.nv/ComputeCache
+      # Uncomment to iterate on env configs without rebuilding. The image already
+      # contains a copy; this shadows it with the host checkout.
+      # - ../source:${DOCKER_ISAACLAB_PATH}/source
+      # - ../scripts:${DOCKER_ISAACLAB_PATH}/scripts
+    network_mode: host
+    # A single GPU on purpose, not `count: all`. With both GPUs visible Isaac Sim
+    # builds a multi-GPU render graph and deadlocks when the other card is busy:
+    #   Submission barrier "MGPU copy queue semaphore dependency
+    #   (signal device = 1, wait device = 0)" timeout ... Received signals: 0
+    # The app then stops responding with no further log output. ISAAC_GPU picks the
+    # card; keep it off any GPU shared with another heavy process.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ "${ISAAC_GPU}" ]
+              capabilities: [ gpu ]
+    entrypoint: bash
+    command: [ "-c", "sleep infinity" ]
+    stdin_open: true
+    tty: true
+    depends_on:
+      - cloudxr-runtime
+
+  # CloudXR runtime. Uses the locally built hybrid image (5.x daemon + 6.0.5 libs);
+  # see cloudxr-hybrid/Dockerfile. NV_DEVICE_PROFILE must stay a profile the 5.x
+  # daemon implements -- auto-webrtc or quest3. The pico4/pico4u profile strings
+  # exist only in the 6.x libs and make the daemon exit immediately.
+  cloudxr-runtime:
+    image: ${CLOUDXR_IMAGE}
+    container_name: cloudxr-runtime${DOCKER_NAME_SUFFIX-}
+    environment:
+      - ACCEPT_EULA=${ACCEPT_EULA}
+      - NV_DEVICE_PROFILE=${NV_DEVICE_PROFILE}
+      # Browser clients need ICE. auto-webrtc enables it implicitly; setting it
+      # explicitly keeps that from silently regressing on a profile change.
+      - NV_CXR_STREAMSDK_ENABLE_ICE=${NV_CXR_STREAMSDK_ENABLE_ICE}
+      - NV_CXR_ENABLE_PUSH_DEVICES=0
+    volumes:
+      - openxr:/openxr:rw
+    network_mode: host
+    deploy: *gpu-all
+    healthcheck:
+      test: [ "CMD", "test", "-S", "/openxr/run/ipc_cloudxr" ]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 10s
+
+  # Serves the WebXR client and reverse-proxies CloudXR signaling on one HTTPS
+  # origin, so the headset's browser sees no mixed-content or CORS gap.
+  webxr:
+    image: caddy:2-alpine
+    container_name: webxr-proxy${DOCKER_NAME_SUFFIX-}
+    environment:
+      - WEBXR_PORT=${WEBXR_PORT}
+      - TLS_CERT=${TLS_CERT}
+      - TLS_KEY=${TLS_KEY}
+      - CLOUDXR_SIGNALING=${CLOUDXR_SIGNALING}
+      - HOSTED_CLIENT_ORIGIN=${HOSTED_CLIENT_ORIGIN}
+    volumes:
+      - ./Caddyfile.container:/etc/caddy/Caddyfile:ro
+      - ../webxr_client:/srv:ro
+      # Certs stay on the host -- private keys are excluded from the image.
+      - ../webxr_certs:/certs:ro
+    network_mode: host
+    depends_on:
+      - cloudxr-runtime
+
+volumes:
+  openxr:
+  isaac-cache-kit:
+  isaac-cache-ov:
+  isaac-cache-gl:
+  isaac-cache-compute:
